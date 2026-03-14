@@ -11,6 +11,15 @@ import type { Device, Texture } from "@luma.gl/core";
 import type { ShaderModule } from "@luma.gl/shadertools";
 import "maplibre-gl/dist/maplibre-gl.css";
 import proj4 from "proj4";
+
+// Bypass Chrome's single-writer cache lock on range requests to avoid
+// serialized tile fetches (see Chromium disk cache locking behavior).
+const _fetch = globalThis.fetch;
+globalThis.fetch = (input, init) => {
+  const hasRange = new Headers(init?.headers).has("range");
+  return _fetch(input, hasRange ? { ...init, cache: "no-store" } : init);
+};
+
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { MapLayerMouseEvent, MapRef } from "react-map-gl/maplibre";
 import { Map as MaplibreMap, Popup, useControl } from "react-map-gl/maplibre";
