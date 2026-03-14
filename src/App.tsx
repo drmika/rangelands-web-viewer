@@ -190,22 +190,30 @@ export default function App() {
   } | null>(null);
 
   // Wrap getTileData to track in-flight tile requests
-  const trackingGetTileData: typeof getTileData = async (image, options) => {
-    loadingCountRef.current++;
-    if (loadingCountRef.current === 1) {
-      clearTimeout(hideTimerRef.current);
-      setTilesLoading(true);
-    }
-    try {
-      return await getTileData(image, options);
-    } finally {
-      loadingCountRef.current--;
-      if (loadingCountRef.current === 0) {
+  const trackingGetTileData: typeof getTileData = useCallback(
+    async (image, options) => {
+      loadingCountRef.current++;
+      if (loadingCountRef.current === 1) {
         clearTimeout(hideTimerRef.current);
-        hideTimerRef.current = setTimeout(() => setTilesLoading(false), 150);
+        setTilesLoading(true);
       }
-    }
-  };
+      try {
+        return await getTileData(image, options);
+      } finally {
+        loadingCountRef.current--;
+        if (loadingCountRef.current === 0) {
+          clearTimeout(hideTimerRef.current);
+          hideTimerRef.current = setTimeout(() => setTilesLoading(false), 150);
+        }
+      }
+    },
+    [],
+  );
+
+  // Clean up debounce timer on unmount
+  useEffect(() => {
+    return () => clearTimeout(hideTimerRef.current);
+  }, []);
 
   // Inject @keyframes spin CSS (project uses no CSS files)
   useEffect(() => {
