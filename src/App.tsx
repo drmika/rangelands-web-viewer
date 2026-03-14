@@ -174,6 +174,10 @@ export default function App() {
   const [rangeMax, setRangeMax] = useState(DATA_MAX);
   const [basemap, setBasemap] = useState<BasemapKey>("dark");
   const [dataOpacity, setDataOpacity] = useState(1);
+  const [metadataLoaded, setMetadataLoaded] = useState(false);
+  const [tilesLoading, setTilesLoading] = useState(false);
+  const loadingCountRef = useRef(0);
+  const hideTimerRef = useRef<ReturnType<typeof setTimeout>>();
   const [clickInfo, setClickInfo] = useState<{
     lng: number;
     lat: number;
@@ -183,6 +187,34 @@ export default function App() {
     geotiff: GeoTIFF;
     toSourceCRS: (lng: number, lat: number) => [number, number];
   } | null>(null);
+
+  // Wrap getTileData to track in-flight tile requests
+  const trackingGetTileData: typeof getTileData = async (image, options) => {
+    loadingCountRef.current++;
+    if (loadingCountRef.current === 1) {
+      clearTimeout(hideTimerRef.current);
+      setTilesLoading(true);
+    }
+    try {
+      return await getTileData(image, options);
+    } finally {
+      loadingCountRef.current--;
+      if (loadingCountRef.current === 0) {
+        clearTimeout(hideTimerRef.current);
+        hideTimerRef.current = setTimeout(() => setTilesLoading(false), 150);
+      }
+    }
+  };
+
+  // Inject @keyframes spin CSS (project uses no CSS files)
+  useEffect(() => {
+    const style = document.createElement("style");
+    style.textContent = `@keyframes spin { to { transform: rotate(360deg); } }`;
+    document.head.appendChild(style);
+    return () => {
+      document.head.removeChild(style);
+    };
+  }, []);
 
   const handleMapClick = useCallback(async (e: MapLayerMouseEvent) => {
     const ref = geotiffRef.current;
@@ -248,7 +280,7 @@ export default function App() {
       id: "agc-layer",
       opacity: dataOpacity,
       geotiff: COG_URL,
-      getTileData,
+      getTileData: trackingGetTileData,
       renderTile: (tileData: TileData): RasterModule[] => [
         {
           module: CreateTexture,
@@ -267,6 +299,7 @@ export default function App() {
         },
       ],
       onGeoTIFFLoad: (tiff, options) => {
+        setMetadataLoaded(true);
         // @ts-expect-error - proj4 types don't support wkt-parser input
         const converter = proj4("EPSG:4326", options.projection);
         geotiffRef.current = {
@@ -343,6 +376,40 @@ export default function App() {
           </Popup>
         )}
       </MaplibreMap>
+
+      {/* Loading spinner */}
+      {(tilesLoading || (colormapTexture && !metadataLoaded)) && (
+        <div
+          style={{
+            position: "absolute",
+            top: "20px",
+            left: "50%",
+            transform: "translateX(-50%)",
+            zIndex: 1000,
+            pointerEvents: "none",
+            display: "flex",
+            alignItems: "center",
+            gap: "8px",
+            background: "rgba(0, 0, 0, 0.7)",
+            color: "#fff",
+            padding: "8px 14px",
+            borderRadius: "20px",
+            fontSize: "13px",
+          }}
+        >
+          <div
+            style={{
+              width: "14px",
+              height: "14px",
+              border: "2px solid rgba(255,255,255,0.3)",
+              borderTopColor: "#fff",
+              borderRadius: "50%",
+              animation: "spin 0.8s linear infinite",
+            }}
+          />
+          {!metadataLoaded ? "Loading metadata…" : "Loading tiles…"}
+        </div>
+      )}
 
       {/* Info Panel */}
       <div
