@@ -145,7 +145,8 @@ async function getTileData(
 ): Promise<TileData> {
   const { device, x, y, signal } = options;
   const tile = await image.fetchTile(x, y, { signal, boundless: false });
-  const { width, height, data } = tile.array;
+  const { width, height } = tile.array;
+  const data = "data" in tile.array ? tile.array.data : tile.array.bands[0]!;
 
   // Reinterpret Int16 bits as Uint16 for r16unorm upload, with row alignment
   const uint16 = new Uint16Array(data.buffer, data.byteOffset, data.length);
@@ -177,7 +178,7 @@ export default function App() {
   const [metadataLoaded, setMetadataLoaded] = useState(false);
   const [tilesLoading, setTilesLoading] = useState(false);
   const loadingCountRef = useRef(0);
-  const hideTimerRef = useRef<ReturnType<typeof setTimeout>>();
+  const hideTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const [clickInfo, setClickInfo] = useState<{
     lng: number;
     lat: number;
@@ -236,7 +237,8 @@ export default function App() {
       const tile = await geotiff.fetchTile(tileX, tileY);
       const px = col % geotiff.tileWidth;
       const py = row % geotiff.tileHeight;
-      const value = tile.array.data[py * tile.array.width + px]!;
+      const arr = "data" in tile.array ? tile.array.data : tile.array.bands[0]!;
+      const value = arr[py * tile.array.width + px]!;
       if (value === 0) {
         setClickInfo(null);
       } else {
@@ -300,7 +302,6 @@ export default function App() {
       ],
       onGeoTIFFLoad: (tiff, options) => {
         setMetadataLoaded(true);
-        // @ts-expect-error - proj4 types don't support wkt-parser input
         const converter = proj4("EPSG:4326", options.projection);
         geotiffRef.current = {
           geotiff: tiff,
@@ -356,11 +357,12 @@ export default function App() {
           pitch: 0,
           bearing: 0,
         }}
-        mapStyle={BASEMAPS[basemap]}
+        mapStyle={BASEMAPS[basemap] as string}
         onClick={handleMapClick}
       >
         <DeckGLOverlay
           layers={layers}
+          // @ts-expect-error interleaved is valid for MapboxOverlay but missing from DeckProps
           interleaved
           onDeviceInitialized={setDevice}
         />
