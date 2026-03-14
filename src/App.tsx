@@ -171,6 +171,7 @@ export default function App() {
   const [rangeMin, setRangeMin] = useState(DATA_MIN);
   const [rangeMax, setRangeMax] = useState(DATA_MAX);
   const [basemap, setBasemap] = useState<BasemapKey>("dark");
+  const [dataOpacity, setDataOpacity] = useState(1);
 
   // Create colormap texture once when device is available
   useEffect(() => {
@@ -195,6 +196,7 @@ export default function App() {
   if (colormapTexture) {
     const cogLayer = new COGLayer<TileData>({
       id: "agc-layer",
+      opacity: dataOpacity,
       geotiff: COG_URL,
       getTileData,
       renderTile: (tileData: TileData): RasterModule[] => [
@@ -358,8 +360,33 @@ export default function App() {
                 borderRadius: "4px",
               }}
             >
-              {basemap === "dark" ? "Switch Basemap to Satellite" : "Switch Basemap to Dark"}
+              {basemap === "dark"
+                ? "Switch to satellite basemap"
+                : "Switch to dark basemap"}
             </button>
+          </div>
+
+          {/* Data opacity slider */}
+          <div style={{ marginBottom: "12px" }}>
+            <label
+              style={{
+                display: "block",
+                fontSize: "12px",
+                color: "#666",
+                marginBottom: "2px",
+              }}
+            >
+              Data Opacity: {Math.round(dataOpacity * 100)}%
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.01}
+                value={dataOpacity}
+                onChange={(e) => setDataOpacity(parseFloat(e.target.value))}
+                style={{ width: "100%", cursor: "pointer" }}
+              />
+            </label>
           </div>
 
           {/* Colormap gradient preview */}
