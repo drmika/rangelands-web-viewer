@@ -36,7 +36,7 @@ This project uses [deck.gl-raster](https://github.com/developmentseed/deck.gl-ra
 Update the submodules with:
 
 ```bash
-git submodule sync && git submodule update --remote deck.gl-raster
+git submodule sync && git submodule update --remote deck.gl-raster && pnpm build:deps
 ```
 
 After pulling updates to the submodule, rebuild with:
