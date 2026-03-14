@@ -12,7 +12,8 @@
     "format": "biome format .",
     "format:fix": "biome format --write .",
     "check": "biome check .",
-    "check:fix": "biome check --write ."
+    "check:fix": "biome check --write .",
+    "prepare": "husky"
   },
   "dependencies": {
     "@deck.gl/core": "^9.2.10",
@@ -39,11 +40,16 @@
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.1.4",
+    "husky": "^9.1.7",
+    "lint-staged": "^16.3.3",
     "vite": "^7.3.1"
   },
   "overrides": {
     "@luma.gl/core": "9.2.6",
     "@luma.gl/shadertools": "9.2.6"
+  },
+  "lint-staged": {
+    "*": "biome check --no-errors-on-unmatched --files-ignore-unknown=true"
   },
   "packageManager": "pnpm@10.32.1"
 }

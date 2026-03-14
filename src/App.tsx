@@ -220,17 +220,9 @@ export default function App() {
     if (!device) return;
 
     // Check for r16unorm support (requires EXT_texture_norm16 in WebGL)
-    try {
-      const test = device.createTexture({
-        data: new Uint16Array(1),
-        format: "r16unorm",
-        width: 1,
-        height: 1,
-      });
-      test.destroy();
-    } catch {
+    if (!device.features.has("norm16-renderable-webgl")) {
       setDeviceError(
-        "This browser does not support the required r16unorm texture format. Please use a Chromium-based browser (Chrome, Edge, Brave).",
+        "This application requires advanced graphics features that are not available in your current browser. Please try opening it in Chrome, Edge, or Brave instead.",
       );
       return;
     }
@@ -308,7 +300,8 @@ export default function App() {
           height: "100%",
           padding: "20px",
           textAlign: "center",
-          fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+          fontFamily:
+            "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
         }}
       >
         <div>
