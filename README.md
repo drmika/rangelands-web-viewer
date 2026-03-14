@@ -33,14 +33,9 @@ The app streams tiles directly from COGs hosted on [source.coop](https://source.
 
 This project uses [deck.gl-raster](https://github.com/developmentseed/deck.gl-raster) as a git submodule (via a [fork](https://github.com/maxrjones/deck.gl-raster)) to include an unreleased fix for custom render pipelines with signed integer data.
 
-Update the submodules with:
+Update the submodules and rebuild with:
 
 ```bash
 git submodule sync && git submodule update --remote deck.gl-raster && pnpm build:deps
 ```
 
-After pulling updates to the submodule, rebuild with:
-
-```bash
-pnpm build:deps
-```
