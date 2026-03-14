@@ -10,9 +10,10 @@ import type { GeoTIFF, Overview } from "@developmentseed/geotiff";
 import type { Device, Texture } from "@luma.gl/core";
 import type { ShaderModule } from "@luma.gl/shadertools";
 import "maplibre-gl/dist/maplibre-gl.css";
-import { useEffect, useRef, useState } from "react";
-import type { MapRef } from "react-map-gl/maplibre";
-import { Map as MaplibreMap, useControl } from "react-map-gl/maplibre";
+import proj4 from "proj4";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { MapLayerMouseEvent, MapRef } from "react-map-gl/maplibre";
+import { Map as MaplibreMap, Popup, useControl } from "react-map-gl/maplibre";
 import colormap from "./colormap";
 
 function DeckGLOverlay(props: DeckProps) {
@@ -172,6 +173,46 @@ export default function App() {
   const [rangeMax, setRangeMax] = useState(DATA_MAX);
   const [basemap, setBasemap] = useState<BasemapKey>("dark");
   const [dataOpacity, setDataOpacity] = useState(1);
+  const [clickInfo, setClickInfo] = useState<{
+    lng: number;
+    lat: number;
+    value: number;
+  } | null>(null);
+  const geotiffRef = useRef<{
+    geotiff: GeoTIFF;
+    toSourceCRS: (lng: number, lat: number) => [number, number];
+  } | null>(null);
+
+  const handleMapClick = useCallback(async (e: MapLayerMouseEvent) => {
+    const ref = geotiffRef.current;
+    if (!ref) return;
+
+    const { geotiff, toSourceCRS } = ref;
+    const [x, y] = toSourceCRS(e.lngLat.lng, e.lngLat.lat);
+    const [row, col] = geotiff.index(x, y);
+
+    if (row < 0 || row >= geotiff.height || col < 0 || col >= geotiff.width) {
+      setClickInfo(null);
+      return;
+    }
+
+    const tileX = Math.floor(col / geotiff.tileWidth);
+    const tileY = Math.floor(row / geotiff.tileHeight);
+
+    try {
+      const tile = await geotiff.fetchTile(tileX, tileY);
+      const px = col % geotiff.tileWidth;
+      const py = row % geotiff.tileHeight;
+      const value = tile.array.data[py * tile.array.width + px]!;
+      if (value === 0) {
+        setClickInfo(null);
+      } else {
+        setClickInfo({ lng: e.lngLat.lng, lat: e.lngLat.lat, value });
+      }
+    } catch {
+      setClickInfo(null);
+    }
+  }, []);
 
   // Create colormap texture once when device is available
   useEffect(() => {
@@ -216,7 +257,15 @@ export default function App() {
           module: SetAlpha1,
         },
       ],
-      onGeoTIFFLoad: (_tiff, options) => {
+      onGeoTIFFLoad: (tiff, options) => {
+        // @ts-expect-error - proj4 types don't support wkt-parser input
+        const converter = proj4("EPSG:4326", options.projection);
+        geotiffRef.current = {
+          geotiff: tiff,
+          toSourceCRS: (lng, lat) =>
+            converter.forward<[number, number]>([lng, lat], false),
+        };
+
         const { west, south, east, north } = options.geographicBounds;
         mapRef.current?.fitBounds(
           [
@@ -243,12 +292,24 @@ export default function App() {
           bearing: 0,
         }}
         mapStyle={BASEMAPS[basemap]}
+        onClick={handleMapClick}
       >
         <DeckGLOverlay
           layers={layers}
           interleaved
           onDeviceInitialized={setDevice}
         />
+        {clickInfo && (
+          <Popup
+            longitude={clickInfo.lng}
+            latitude={clickInfo.lat}
+            closeOnClick={false}
+            onClose={() => setClickInfo(null)}
+            anchor="bottom"
+          >
+            <strong>{clickInfo.value}</strong>
+          </Popup>
+        )}
       </MaplibreMap>
 
       {/* Info Panel */}

@@ -41,12 +41,18 @@ importers:
       '@luma.gl/shadertools':
         specifier: 9.2.6
         version: 9.2.6(@luma.gl/core@9.2.6)
+      '@types/proj4':
+        specifier: ^2.19.0
+        version: 2.19.0
       lerc:
         specifier: ^4.1.0
         version: 4.1.0
       maplibre-gl:
         specifier: ^5.19.0
         version: 5.20.1
+      proj4:
+        specifier: ^2.20.4
+        version: 2.20.4
       react:
         specifier: ^19.2.4
         version: 19.2.4
@@ -1213,6 +1219,10 @@ packages:
 
   '@types/pako@1.0.7':
     resolution: {integrity: sha512-YBtzT2ztNF6R/9+UXj2wTGFnC9NklAnASt3sC0h2m1bbH7G6FyBIkt4AN8ThZpNfxUo1b2iMVO0UawiJymEt8A==}
+
+  '@types/proj4@2.19.0':
+    resolution: {integrity: sha512-mirdnXu5sW9+IphQ4r+ZVii2JVLDbXgMp1lxqbiCppdgL22EwMwL4Dy/cyHVaJ2y/mi7LUQHghpILd3w3j2bnA==}
+    deprecated: This is a stub types definition. proj4 provides its own type definitions, so you do not need this installed.
 
   '@types/react-dom@19.2.3':
     resolution: {integrity: sha512-jp2L/eY6fn+KgVVQAOqYItbF0VY/YApe5Mz2F0aykSO8gx31bYCZyvSeYxCHKvzHG5eZjc+zyaS5BrBWya2+kQ==}
@@ -2992,6 +3002,10 @@ snapshots:
   '@types/offscreencanvas@2019.7.3': {}
 
   '@types/pako@1.0.7': {}
+
+  '@types/proj4@2.19.0':
+    dependencies:
+      proj4: 2.20.4
 
   '@types/react-dom@19.2.3(@types/react@19.2.14)':
     dependencies:
