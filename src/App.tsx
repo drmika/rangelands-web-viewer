@@ -1,3 +1,4 @@
+import { SourceHttp } from "@chunkd/source-http";
 import type { DeckProps } from "@deck.gl/core";
 import { MapboxOverlay } from "@deck.gl/mapbox";
 import { COGLayer } from "@developmentseed/deck.gl-geotiff";
@@ -6,20 +7,12 @@ import {
   Colormap,
   CreateTexture,
 } from "@developmentseed/deck.gl-raster/gpu-modules";
-import type { GeoTIFF, Overview } from "@developmentseed/geotiff";
+import type { Overview } from "@developmentseed/geotiff";
+import { GeoTIFF } from "@developmentseed/geotiff";
 import type { Device, Texture } from "@luma.gl/core";
 import type { ShaderModule } from "@luma.gl/shadertools";
 import "maplibre-gl/dist/maplibre-gl.css";
 import proj4 from "proj4";
-
-// Bypass Chrome's single-writer cache lock on range requests to avoid
-// serialized tile fetches (see Chromium disk cache locking behavior).
-const _fetch = globalThis.fetch;
-globalThis.fetch = (input, init) => {
-  const hasRange = new Headers(init?.headers).has("range");
-  return _fetch(input, hasRange ? { ...init, cache: "no-store" } : init);
-};
-
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { MapLayerMouseEvent, MapRef } from "react-map-gl/maplibre";
 import { Map as MaplibreMap, Popup, useControl } from "react-map-gl/maplibre";
@@ -62,6 +55,14 @@ type BasemapKey = keyof typeof BASEMAPS;
 // ---- Data source (Int16 COG on source.coop) ----
 const COG_URL =
   "https://s3.us-west-2.amazonaws.com/us-west-2.opendata.source.coop/luddaludwig/potential-agc-combustion-ssp585-v0/AGC_final.tif";
+
+// Bypass Chrome's single-writer cache lock on range requests to avoid
+// serialized tile fetches (see Chromium disk cache locking behavior).
+// Scoped to SourceHttp only — does not affect MapLibre or other fetches.
+SourceHttp.fetch = (input, init) =>
+  fetch(input, { ...init, cache: "no-store" });
+
+const cogPromise = GeoTIFF.fromUrl(COG_URL);
 
 // ---- Data range (from gdalinfo: Min=0, Max=4102 for the unsigned version) ----
 // The Int16 source has the same value range; negative values are nodata/unused.
@@ -184,6 +185,7 @@ export default function App() {
   const [rangeMax, setRangeMax] = useState(DATA_MAX);
   const [basemap, setBasemap] = useState<BasemapKey>("dark");
   const [dataOpacity, setDataOpacity] = useState(1);
+  const [cog, setCog] = useState<GeoTIFF | null>(null);
   const [metadataLoaded, setMetadataLoaded] = useState(false);
   const [tilesLoading, setTilesLoading] = useState(false);
   const loadingCountRef = useRef(0);
@@ -226,6 +228,10 @@ export default function App() {
   }, []);
 
   // Inject @keyframes spin CSS (project uses no CSS files)
+  useEffect(() => {
+    cogPromise.then(setCog);
+  }, []);
+
   useEffect(() => {
     const style = document.createElement("style");
     style.textContent = `@keyframes spin { to { transform: rotate(360deg); } }`;
@@ -295,11 +301,11 @@ export default function App() {
 
   const layers = [];
 
-  if (colormapTexture) {
+  if (colormapTexture && cog) {
     const cogLayer = new COGLayer<TileData>({
       id: "agc-layer",
       opacity: dataOpacity,
-      geotiff: COG_URL,
+      geotiff: cog,
       getTileData: trackingGetTileData,
       renderTile: (tileData: TileData): RasterModule[] => [
         {
