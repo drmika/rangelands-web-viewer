@@ -168,6 +168,7 @@ async function getTileData(
 export default function App() {
   const mapRef = useRef<MapRef>(null);
   const [device, setDevice] = useState<Device | null>(null);
+  const [deviceError, setDeviceError] = useState<string | null>(null);
   const [colormapTexture, setColormapTexture] = useState<Texture | null>(null);
   const [rangeMin, setRangeMin] = useState(DATA_MIN);
   const [rangeMax, setRangeMax] = useState(DATA_MAX);
@@ -214,9 +215,25 @@ export default function App() {
     }
   }, []);
 
-  // Create colormap texture once when device is available
+  // Validate device capabilities and create colormap texture
   useEffect(() => {
     if (!device) return;
+
+    // Check for r16unorm support (requires EXT_texture_norm16 in WebGL)
+    try {
+      const test = device.createTexture({
+        data: new Uint16Array(1),
+        format: "r16unorm",
+        width: 1,
+        height: 1,
+      });
+      test.destroy();
+    } catch {
+      setDeviceError(
+        "This browser does not support the required r16unorm texture format. Please use a Chromium-based browser (Chrome, Edge, Brave).",
+      );
+      return;
+    }
 
     const texture = device.createTexture({
       data: colormap.data,
@@ -278,6 +295,28 @@ export default function App() {
       ...(basemap === "dark" && { beforeId: "boundary_country_outline" }),
     });
     layers.push(cogLayer);
+  }
+
+  if (deviceError) {
+    return (
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          width: "100%",
+          height: "100%",
+          padding: "20px",
+          textAlign: "center",
+          fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+        }}
+      >
+        <div>
+          <h2 style={{ marginBottom: "8px" }}>Browser Not Supported</h2>
+          <p style={{ color: "#666" }}>{deviceError}</p>
+        </div>
+      </div>
+    );
   }
 
   return (
