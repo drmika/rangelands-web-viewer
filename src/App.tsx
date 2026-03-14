@@ -52,7 +52,7 @@ type BasemapKey = keyof typeof BASEMAPS;
 
 // ---- Data source (Int16 COG on source.coop) ----
 const COG_URL =
-  "https://data.source.coop/luddaludwig/potential-agc-combustion-ssp585-v0/AGC_final.tif";
+  "https://s3.us-west-2.amazonaws.com/us-west-2.opendata.source.coop/luddaludwig/potential-agc-combustion-ssp585-v0/AGC_final.tif";
 
 // ---- Data range (from gdalinfo: Min=0, Max=4102 for the unsigned version) ----
 // The Int16 source has the same value range; negative values are nodata/unused.
