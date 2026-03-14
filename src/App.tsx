@@ -489,9 +489,19 @@ export default function App() {
               borderRadius: "2px",
               background:
                 "linear-gradient(to right, #440154, #3b528b, #21918c, #5ec962, #b5de2b, #fde725)",
-              marginBottom: "12px",
+              marginBottom: "4px",
             }}
           />
+          <p
+            style={{
+              margin: "0 0 12px 0",
+              fontSize: "11px",
+              color: "#999",
+              textAlign: "center",
+            }}
+          >
+            g‑C/m<sup>2</sup>
+          </p>
 
           <p style={{ margin: 0, fontSize: "11px", color: "#999" }}>
             Data:{" "}
