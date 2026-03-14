@@ -1,0 +1,46 @@
+{
+  "name": "agc-viz",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:deps": "pnpm --filter './deck.gl-raster/packages/*' build",
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "lint": "biome lint .",
+    "lint:fix": "biome lint --write .",
+    "format": "biome format .",
+    "format:fix": "biome format --write .",
+    "check": "biome check .",
+    "check:fix": "biome check --write ."
+  },
+  "dependencies": {
+    "@deck.gl/core": "^9.2.10",
+    "@deck.gl/extensions": "^9.2.11",
+    "@deck.gl/geo-layers": "^9.2.10",
+    "@deck.gl/layers": "^9.2.10",
+    "@deck.gl/mapbox": "^9.2.10",
+    "@deck.gl/mesh-layers": "^9.2.10",
+    "@developmentseed/deck.gl-geotiff": "workspace:^",
+    "@developmentseed/deck.gl-raster": "workspace:^",
+    "@developmentseed/geotiff": "workspace:^",
+    "@luma.gl/core": "9.2.6",
+    "@luma.gl/shadertools": "9.2.6",
+    "lerc": "^4.1.0",
+    "maplibre-gl": "^5.19.0",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "react-map-gl": "^8.1.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.7",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.4",
+    "vite": "^7.3.1"
+  },
+  "overrides": {
+    "@luma.gl/core": "9.2.6",
+    "@luma.gl/shadertools": "9.2.6"
+  }
+}

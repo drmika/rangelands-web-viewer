@@ -1,0 +1,14 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.4.7/schema.json",
+  "extends": ["./deck.gl-raster/biome.json"],
+  "files": {
+    "includes": [
+      "src/**",
+      "*.ts",
+      "*.json",
+      "!!deck.gl-raster",
+      "!!node_modules",
+      "!!dist"
+    ]
+  }
+}
