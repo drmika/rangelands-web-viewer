@@ -21,6 +21,34 @@ function DeckGLOverlay(props: DeckProps) {
   return null;
 }
 
+// ---- Basemap styles ----
+const BASEMAPS = {
+  dark: "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
+  satellite: {
+    version: 8 as const,
+    sources: {
+      "esri-satellite": {
+        type: "raster" as const,
+        tiles: [
+          "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        ],
+        tileSize: 256,
+        attribution:
+          "Esri, Maxar, Earthstar Geographics, and the GIS User Community",
+      },
+    },
+    layers: [
+      {
+        id: "esri-satellite-layer",
+        type: "raster" as const,
+        source: "esri-satellite",
+      },
+    ],
+  },
+} as const;
+
+type BasemapKey = keyof typeof BASEMAPS;
+
 // ---- Data source (Int16 COG on source.coop) ----
 const COG_URL =
   "https://data.source.coop/luddaludwig/potential-agc-combustion-ssp585-v0/AGC_final.tif";
@@ -87,7 +115,11 @@ type TileData = {
  * For single-channel r16unorm, each row is width*2 bytes. If not divisible
  * by 4 (i.e., odd width), we must pad each row.
  */
-function padRows(data: Uint16Array, width: number, height: number): Uint16Array {
+function padRows(
+  data: Uint16Array,
+  width: number,
+  height: number,
+): Uint16Array {
   const rowBytes = width * 2;
   const alignedRowBytes = Math.ceil(rowBytes / 4) * 4;
   if (alignedRowBytes === rowBytes) return data;
@@ -138,6 +170,7 @@ export default function App() {
   const [colormapTexture, setColormapTexture] = useState<Texture | null>(null);
   const [rangeMin, setRangeMin] = useState(DATA_MIN);
   const [rangeMax, setRangeMax] = useState(DATA_MAX);
+  const [basemap, setBasemap] = useState<BasemapKey>("dark");
 
   // Create colormap texture once when device is available
   useEffect(() => {
@@ -191,7 +224,7 @@ export default function App() {
           { padding: 40, duration: 1000 },
         );
       },
-      beforeId: "boundary_country_outline",
+      ...(basemap === "dark" && { beforeId: "boundary_country_outline" }),
     });
     layers.push(cogLayer);
   }
@@ -207,7 +240,7 @@ export default function App() {
           pitch: 0,
           bearing: 0,
         }}
-        mapStyle="https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json"
+        mapStyle={BASEMAPS[basemap]}
       >
         <DeckGLOverlay
           layers={layers}
@@ -308,6 +341,27 @@ export default function App() {
             </label>
           </div>
 
+          {/* Basemap toggle */}
+          <div style={{ marginBottom: "12px" }}>
+            <button
+              type="button"
+              onClick={() =>
+                setBasemap((b) => (b === "dark" ? "satellite" : "dark"))
+              }
+              style={{
+                width: "100%",
+                padding: "6px 12px",
+                fontSize: "12px",
+                cursor: "pointer",
+                background: "#f0f0f0",
+                border: "1px solid #ccc",
+                borderRadius: "4px",
+              }}
+            >
+              {basemap === "dark" ? "Switch Basemap to Satellite" : "Switch Basemap to Dark"}
+            </button>
+          </div>
+
           {/* Colormap gradient preview */}
           <div
             style={{
@@ -335,7 +389,11 @@ export default function App() {
               href="https://github.com/developmentseed/deck.gl-raster"
               target="_blank"
               rel="noopener noreferrer"
-              style={{ color: "#666", fontFamily: "monospace", fontSize: "10px" }}
+              style={{
+                color: "#666",
+                fontFamily: "monospace",
+                fontSize: "10px",
+              }}
             >
               deck.gl-raster
             </a>
