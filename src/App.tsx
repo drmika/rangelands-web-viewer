@@ -392,7 +392,20 @@ export default function App() {
             onClose={() => setClickInfo(null)}
             anchor="bottom"
           >
-            <strong>{clickInfo.value}</strong>
+            <div style={{ lineHeight: 1.5 }}>
+              <div>
+                <span style={{ opacity: 0.6 }}>Value</span>{" "}
+                <strong>{clickInfo.value}</strong>
+              </div>
+              <div>
+                <span style={{ opacity: 0.6 }}>Lat</span>{" "}
+                {clickInfo.lat.toFixed(5)}
+              </div>
+              <div>
+                <span style={{ opacity: 0.6 }}>Lon</span>{" "}
+                {clickInfo.lng.toFixed(5)}
+              </div>
+            </div>
           </Popup>
         )}
       </MaplibreMap>
