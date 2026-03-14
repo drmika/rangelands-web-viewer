@@ -188,6 +188,7 @@ export default function App() {
   const [tilesLoading, setTilesLoading] = useState(false);
   const loadingCountRef = useRef(0);
   const hideTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const [panelOpen, setPanelOpen] = useState(() => window.innerWidth >= 768);
   const [clickInfo, setClickInfo] = useState<{
     lng: number;
     lat: number;
@@ -430,43 +431,90 @@ export default function App() {
         </div>
       )}
 
+      {/* Panel toggle button (visible when collapsed) */}
+      {!panelOpen && (
+        <button
+          type="button"
+          onClick={() => setPanelOpen(true)}
+          style={{
+            position: "absolute",
+            top: "20px",
+            left: "20px",
+            zIndex: 1000,
+            width: "36px",
+            height: "36px",
+            borderRadius: "8px",
+            border: "none",
+            background: "white",
+            boxShadow: "0 2px 8px rgba(0,0,0,0.15)",
+            cursor: "pointer",
+            fontSize: "18px",
+            lineHeight: 1,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+          aria-label="Open settings"
+        >
+          &#9776;
+        </button>
+      )}
+
       {/* Info Panel */}
-      <div
-        style={{
-          position: "absolute",
-          top: 0,
-          left: 0,
-          width: "100%",
-          height: "100%",
-          pointerEvents: "none",
-          zIndex: 1000,
-        }}
-      >
+      {panelOpen && (
         <div
           style={{
             position: "absolute",
             top: "20px",
             left: "20px",
+            zIndex: 1000,
             background: "white",
             padding: "16px",
             borderRadius: "8px",
             boxShadow: "0 2px 8px rgba(0,0,0,0.15)",
             maxWidth: "320px",
-            pointerEvents: "auto",
+            width: "calc(100vw - 40px)",
+            boxSizing: "border-box",
           }}
         >
-          <h3 style={{ margin: "0 0 4px 0", fontSize: "16px" }}>
-            Potential Above-Ground Combustion
-          </h3>
-          <p
+          <div
             style={{
-              margin: "0 0 12px 0",
-              fontSize: "12px",
-              color: "#666",
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "flex-start",
             }}
           >
-            Boreal and Arctic North America — SSP585
-          </p>
+            <div>
+              <h3 style={{ margin: "0 0 4px 0", fontSize: "16px" }}>
+                Potential Above-Ground Combustion
+              </h3>
+              <p
+                style={{
+                  margin: "0 0 12px 0",
+                  fontSize: "12px",
+                  color: "#666",
+                }}
+              >
+                Boreal and Arctic North America — SSP585
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setPanelOpen(false)}
+              style={{
+                background: "none",
+                border: "none",
+                cursor: "pointer",
+                fontSize: "18px",
+                lineHeight: 1,
+                padding: "0 0 0 8px",
+                color: "#999",
+              }}
+              aria-label="Close settings"
+            >
+              &#10005;
+            </button>
+          </div>
 
           {/* Min slider */}
           <div style={{ marginBottom: "8px" }}>
@@ -615,7 +663,7 @@ export default function App() {
             </a>
           </p>
         </div>
-      </div>
+      )}
     </div>
   );
 }
