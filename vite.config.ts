@@ -3,7 +3,7 @@ import { defineConfig } from "vite";
 
 export default defineConfig({
   plugins: [react()],
-  base: "/boreal-web-viewer/",
+  base: "/rangelands-web-viewer/",
   worker: { format: "es" },
   server: {
     port: 3000,

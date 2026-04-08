@@ -3,20 +3,44 @@ import type { DeckProps } from "@deck.gl/core";
 import { MapboxOverlay } from "@deck.gl/mapbox";
 import { COGLayer } from "@developmentseed/deck.gl-geotiff";
 import type { RasterModule } from "@developmentseed/deck.gl-raster";
-import {
-  Colormap,
-  CreateTexture,
-} from "@developmentseed/deck.gl-raster/gpu-modules";
+import { CreateTexture } from "@developmentseed/deck.gl-raster/gpu-modules";
 import type { Overview } from "@developmentseed/geotiff";
 import { GeoTIFF } from "@developmentseed/geotiff";
 import type { Device, Texture } from "@luma.gl/core";
 import type { ShaderModule } from "@luma.gl/shadertools";
 import "maplibre-gl/dist/maplibre-gl.css";
-import proj4 from "proj4";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { MapLayerMouseEvent, MapRef } from "react-map-gl/maplibre";
 import { Map as MaplibreMap, Popup, useControl } from "react-map-gl/maplibre";
-import colormap from "./colormap";
+
+// ---- Custom EPSG resolver ----
+// ---- Custom EPSG resolver ----
+// The default resolver uses epsg.io PROJJSON, whose shape doesn't match what
+// generateTileMatrixSet reads (it looks for top-level `units`, `a`, and
+// `datum.a`). We return hand-built stubs for the EPSG codes we care about,
+// and fall through to epsg.io for anything else.
+const customEpsgResolver = async (epsg: number) => {
+  if (epsg === 3857) {
+    // Web Mercator — metres
+    return {
+      projName: "merc",
+      units: "metre",
+      a: 6378137,
+      datum: { a: 6378137 },
+    } as never;
+  }
+  if (epsg === 4326) {
+    return {
+      projName: "longlat",
+      units: "degree",
+      a: 6378137,
+      datum: { a: 6378137 },
+    } as never;
+  }
+  const resp = await fetch(`https://epsg.io/${epsg}.json`);
+  if (!resp.ok) throw new Error(`Failed to fetch PROJJSON for EPSG:${epsg}`);
+  return (await resp.json()) as never;
+};
 
 function DeckGLOverlay(props: DeckProps) {
   const overlay = useControl<MapboxOverlay>(() => new MapboxOverlay(props));
@@ -25,8 +49,11 @@ function DeckGLOverlay(props: DeckProps) {
 }
 
 // ---- Basemap styles ----
+// "light" is CARTO's positron (light gray with dark country borders).
+// "satellite" is Esri World Imagery. We lighten it with raster-brightness-min
+// so the rangelands data layer stays readable on top.
 const BASEMAPS = {
-  dark: "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
+  light: "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
   satellite: {
     version: 8 as const,
     sources: {
@@ -45,6 +72,16 @@ const BASEMAPS = {
         id: "esri-satellite-layer",
         type: "raster" as const,
         source: "esri-satellite",
+        paint: {
+          // Raise the minimum brightness floor so dark pixels (forests,
+          // shadows) are washed out toward white. 0 = unchanged, 1 = fully
+          // white. 0.5 is a strong lightening effect that keeps enough
+          // structure to recognize continents and terrain.
+          "raster-brightness-min": 0.5,
+          // Optionally desaturate to reduce visual competition with the
+          // rangelands palette. 0 = unchanged, 1 = fully grayscale.
+          "raster-saturation": -0.3,
+        },
       },
     ],
   },
@@ -52,9 +89,10 @@ const BASEMAPS = {
 
 type BasemapKey = keyof typeof BASEMAPS;
 
-// ---- Data source (Int16 COG on source.coop) ----
+// ---- Data source: uint8 global grazing lands COG on Source Cooperative ----
 const COG_URL =
-  "https://s3.us-west-2.amazonaws.com/us-west-2.opendata.source.coop/luddaludwig/potential-agc-combustion-ssp585-v0/AGC_final.tif";
+  //"https://data.source.coop/woodwell-climate/rangelands-raster-1/global_grazing_lands_3857.tif?v=1";
+  "https://data.source.coop/woodwell-climate/rangelands-raster-1/global_grazing_lands_4326_84.tif";
 
 // Bypass Chrome's single-writer cache lock on range requests to avoid
 // serialized tile fetches (see Chromium disk cache locking behavior).
@@ -64,52 +102,65 @@ SourceHttp.fetch = (input, init) =>
 
 const cogPromise = GeoTIFF.fromUrl(COG_URL);
 
-// ---- Data range (from gdalinfo: Min=0, Max=4102 for the unsigned version) ----
-// The Int16 source has the same value range; negative values are nodata/unused.
-const DATA_MIN = 0;
-const DATA_MAX = 4102;
+// ---- Class definitions ----
+// The raster is uint8 with these class values:
+//   0   = not grazing land (discarded as nodata)
+//   1   = livestock-driven grazing (<33% grassland but high livestock)
+//   2   = 33–50% grassland
+//   3   = 50–80% grassland
+//   4   = 80%+ grassland
+//   255 = nodata (discarded)
+type ClassInfo = { value: number; label: string; color: string };
 
-// ---- Custom shader: rescale r16unorm value to [0,1] using min/max ----
-// r16unorm maps 0..65535 → 0.0..1.0, so rawValue = color.r * 65535.0
-type RescaleProps = { rangeMin: number; rangeMax: number };
+const CLASSES: ClassInfo[] = [
+  { value: 1, label: "Livestock-driven (<33% grass)", color: "#fee0d2" },
+  { value: 2, label: "33–50% grassland", color: "#c2e7bc" },
+  { value: 3, label: "50–80% grassland", color: "#7ccd6f" },
+  { value: 4, label: "80%+ grassland", color: "#5d9a54" },
+];
 
-const Rescale = {
-  name: "rescale",
-  fs: `\
-uniform rescaleUniforms {
-  float rangeMin;
-  float rangeMax;
-} rescale;
-`,
+/** Convert "#rrggbb" to normalized [r, g, b] in 0..1 range for GLSL */
+function hexToRgbNorm(hex: string): [number, number, number] {
+  const h = hex.replace("#", "");
+  return [
+    parseInt(h.slice(0, 2), 16) / 255,
+    parseInt(h.slice(2, 4), 16) / 255,
+    parseInt(h.slice(4, 6), 16) / 255,
+  ];
+}
+
+const [C1_R, C1_G, C1_B] = hexToRgbNorm(CLASSES[0].color);
+const [C2_R, C2_G, C2_B] = hexToRgbNorm(CLASSES[1].color);
+const [C3_R, C3_G, C3_B] = hexToRgbNorm(CLASSES[2].color);
+const [C4_R, C4_G, C4_B] = hexToRgbNorm(CLASSES[3].color);
+
+// ---- Custom shader: map discrete uint8 class values to colors ----
+// r8unorm maps 0..255 → 0.0..1.0, so rawValue = color.r * 255.0
+// We compare the raw class value and assign the corresponding RGB.
+const CategoricalColormap = {
+  name: "categorical-colormap",
   inject: {
     "fs:DECKGL_FILTER_COLOR": /* glsl */ `
-      float rawValue = color.r * 65535.0;
-      // Treat 0 as nodata
-      if (rawValue == 0.0) discard;
-      float t = clamp(
-        (rawValue - rescale.rangeMin) / (rescale.rangeMax - rescale.rangeMin),
-        0.0,
-        1.0
-      );
-      color.r = t;
-    `,
-  },
-  uniformTypes: {
-    rangeMin: "f32",
-    rangeMax: "f32",
-  },
-  getUniforms: (props: Partial<RescaleProps>) => ({
-    rangeMin: props.rangeMin ?? DATA_MIN,
-    rangeMax: props.rangeMax ?? DATA_MAX,
-  }),
-} as const satisfies ShaderModule<RescaleProps>;
+      float rawValue = color.r * 255.0;
+      int classValue = int(rawValue + 0.5);
 
-/** Set alpha to 1.0 (data has no alpha channel) */
-const SetAlpha1 = {
-  name: "set-alpha-1",
-  inject: {
-    "fs:DECKGL_FILTER_COLOR": /* glsl */ `
-      color = vec4(color.rgb, 1.0);
+      // Discard nodata (0 = not grazing land, 255 = raster nodata)
+      if (classValue == 0 || classValue == 255) discard;
+
+      vec3 rgb;
+      if (classValue == 1) {
+        rgb = vec3(${C1_R.toFixed(6)}, ${C1_G.toFixed(6)}, ${C1_B.toFixed(6)});
+      } else if (classValue == 2) {
+        rgb = vec3(${C2_R.toFixed(6)}, ${C2_G.toFixed(6)}, ${C2_B.toFixed(6)});
+      } else if (classValue == 3) {
+        rgb = vec3(${C3_R.toFixed(6)}, ${C3_G.toFixed(6)}, ${C3_B.toFixed(6)});
+      } else if (classValue == 4) {
+        rgb = vec3(${C4_R.toFixed(6)}, ${C4_G.toFixed(6)}, ${C4_B.toFixed(6)});
+      } else {
+        discard;
+      }
+
+      color = vec4(rgb, 1.0);
     `,
   },
 } as const satisfies ShaderModule;
@@ -122,33 +173,27 @@ type TileData = {
 };
 
 /**
- * Pad 16-bit data rows to 4-byte alignment for WebGL's UNPACK_ALIGNMENT.
- * For single-channel r16unorm, each row is width*2 bytes. If not divisible
- * by 4 (i.e., odd width), we must pad each row.
+ * Pad 8-bit data rows to 4-byte alignment for WebGL's UNPACK_ALIGNMENT.
+ * For single-channel r8unorm, each row is width bytes. If not divisible
+ * by 4, we must pad each row.
  */
-function padRows(
-  data: Uint16Array,
-  width: number,
-  height: number,
-): Uint16Array {
-  const rowBytes = width * 2;
+function padRows(data: Uint8Array, width: number, height: number): Uint8Array {
+  const rowBytes = width;
   const alignedRowBytes = Math.ceil(rowBytes / 4) * 4;
   if (alignedRowBytes === rowBytes) return data;
 
-  const src = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
   const dst = new Uint8Array(alignedRowBytes * height);
   for (let r = 0; r < height; r++) {
     dst.set(
-      src.subarray(r * rowBytes, (r + 1) * rowBytes),
+      data.subarray(r * rowBytes, (r + 1) * rowBytes),
       r * alignedRowBytes,
     );
   }
-  return new Uint16Array(dst.buffer);
+  return dst;
 }
 
-/** Custom tile loader for single-band Int16 data.
- *  Uploads as r16unorm (reinterprets bits as unsigned). Since actual values
- *  are positive (0–4102), this avoids an Int16→Float32 copy. */
+/** Custom tile loader for single-band uint8 categorical data.
+ *  Uploads as r8unorm; the shader reinterprets values 0..255 as class IDs. */
 async function getTileData(
   image: GeoTIFF | Overview,
   options: { device: Device; x: number; y: number; signal?: AbortSignal },
@@ -158,13 +203,13 @@ async function getTileData(
   const { width, height } = tile.array;
   const data = "data" in tile.array ? tile.array.data : tile.array.bands[0]!;
 
-  // Reinterpret Int16 bits as Uint16 for r16unorm upload, with row alignment
-  const uint16 = new Uint16Array(data.buffer, data.byteOffset, data.length);
-  const aligned = padRows(uint16, width, height);
+  // Ensure uint8 view, then row-align for WebGL upload
+  const uint8 = new Uint8Array(data.buffer, data.byteOffset, data.length);
+  const aligned = padRows(uint8, width, height);
 
   const texture = device.createTexture({
     data: aligned,
-    format: "r16unorm",
+    format: "r8unorm",
     width,
     height,
     sampler: {
@@ -179,12 +224,8 @@ async function getTileData(
 export default function App() {
   const mapRef = useRef<MapRef>(null);
   const [device, setDevice] = useState<Device | null>(null);
-  const [deviceError, setDeviceError] = useState<string | null>(null);
-  const [colormapTexture, setColormapTexture] = useState<Texture | null>(null);
-  const [rangeMin, setRangeMin] = useState(DATA_MIN);
-  const [rangeMax, setRangeMax] = useState(DATA_MAX);
-  const [basemap, setBasemap] = useState<BasemapKey>("dark");
   const [dataOpacity, setDataOpacity] = useState(1);
+  const [basemap, setBasemap] = useState<BasemapKey>("light");
   const [cog, setCog] = useState<GeoTIFF | null>(null);
   const [metadataLoaded, setMetadataLoaded] = useState(false);
   const [tilesLoading, setTilesLoading] = useState(false);
@@ -227,11 +268,11 @@ export default function App() {
     return () => clearTimeout(hideTimerRef.current);
   }, []);
 
-  // Inject @keyframes spin CSS (project uses no CSS files)
   useEffect(() => {
     cogPromise.then(setCog);
   }, []);
 
+  // Inject @keyframes spin CSS (project uses no CSS files)
   useEffect(() => {
     const style = document.createElement("style");
     style.textContent = `@keyframes spin { to { transform: rotate(360deg); } }`;
@@ -263,7 +304,8 @@ export default function App() {
       const py = row % geotiff.tileHeight;
       const arr = "data" in tile.array ? tile.array.data : tile.array.bands[0]!;
       const value = arr[py * tile.array.width + px]!;
-      if (value === 0) {
+      // Only show popup for real grazing-land classes (1–4)
+      if (value === 0 || value === 255) {
         setClickInfo(null);
       } else {
         setClickInfo({ lng: e.lngLat.lng, lat: e.lngLat.lat, value });
@@ -273,39 +315,14 @@ export default function App() {
     }
   }, []);
 
-  // Validate device capabilities and create colormap texture
-  useEffect(() => {
-    if (!device) return;
-
-    // Check for r16unorm support (requires EXT_texture_norm16 in WebGL)
-    if (!device.features.has("norm16-renderable-webgl")) {
-      setDeviceError(
-        "This application requires advanced graphics features that are not available in your current browser. Please try opening it in Chrome, Edge, or Brave instead.",
-      );
-      return;
-    }
-
-    const texture = device.createTexture({
-      data: colormap.data,
-      width: colormap.width,
-      height: colormap.height,
-      format: "rgba8unorm",
-      sampler: {
-        addressModeU: "clamp-to-edge",
-        addressModeV: "clamp-to-edge",
-      },
-    });
-
-    setColormapTexture(texture);
-  }, [device]);
-
   const layers = [];
 
-  if (colormapTexture && cog) {
+  if (cog) {
     const cogLayer = new COGLayer<TileData>({
-      id: "agc-layer",
+      id: "grazing-lands-layer",
       opacity: dataOpacity,
       geotiff: cog,
+      epsgResolver: customEpsgResolver, // ← add this
       getTileData: trackingGetTileData,
       renderTile: (tileData: TileData): RasterModule[] => [
         {
@@ -313,71 +330,67 @@ export default function App() {
           props: { textureName: tileData.texture },
         },
         {
-          module: Rescale,
-          props: { rangeMin, rangeMax },
-        },
-        {
-          module: Colormap,
-          props: { colormapTexture },
-        },
-        {
-          module: SetAlpha1,
+          module: CategoricalColormap,
         },
       ],
       onGeoTIFFLoad: (tiff, options) => {
+        console.log("GeoTIFF loaded:", {
+          projection: options.projection,
+          geographicBounds: options.geographicBounds,
+          width: tiff.width,
+          height: tiff.height,
+          tileWidth: tiff.tileWidth,
+          tileHeight: tiff.tileHeight,
+        });
         setMetadataLoaded(true);
-        const converter = proj4("EPSG:4326", options.projection);
+
+        // For EPSG:4326 rasters, source CRS IS lat/lon, so the converter is
+        // an identity function. This avoids trying to build a (broken) proj4
+        // transformer from our stub projection object.
         geotiffRef.current = {
           geotiff: tiff,
-          toSourceCRS: (lng, lat) =>
-            converter.forward<[number, number]>([lng, lat], false),
+          toSourceCRS: (lng, lat) => [lng, lat],
         };
 
-        const { west, south, east, north } = options.geographicBounds;
-        mapRef.current?.fitBounds(
-          [
-            [west, south],
-            [east, north],
-          ],
-          { padding: 40, duration: 1000 },
-        );
+        // Use bounds from options if valid, otherwise fall back to global
+        // extent. We know from gdalinfo this raster is -180,-90,180,90.
+        // (Use ±85 instead of ±90 because Web Mercator breaks at the poles.)
+        const b = options.geographicBounds;
+        const boundsValid =
+          Number.isFinite(b.west) &&
+          Number.isFinite(b.south) &&
+          Number.isFinite(b.east) &&
+          Number.isFinite(b.north);
+
+        const fit: [[number, number], [number, number]] = boundsValid
+          ? [
+              [b.west, b.south],
+              [b.east, b.north],
+            ]
+          : [
+              [-180, -85],
+              [180, 85],
+            ];
+
+        mapRef.current?.fitBounds(fit, { padding: 40, duration: 1000 });
       },
-      ...(basemap === "dark" && { beforeId: "boundary_country_outline" }),
     });
     layers.push(cogLayer);
   }
 
-  if (deviceError) {
-    return (
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          width: "100%",
-          height: "100%",
-          padding: "20px",
-          textAlign: "center",
-          fontFamily:
-            "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
-        }}
-      >
-        <div>
-          <h2 style={{ marginBottom: "8px" }}>Browser Not Supported</h2>
-          <p style={{ color: "#666" }}>{deviceError}</p>
-        </div>
-      </div>
-    );
-  }
+  // Look up the label for the currently clicked class
+  const clickedClass = clickInfo
+    ? CLASSES.find((c) => c.value === clickInfo.value)
+    : null;
 
   return (
     <div style={{ position: "relative", width: "100%", height: "100%" }}>
       <MaplibreMap
         ref={mapRef}
         initialViewState={{
-          longitude: -112.5,
-          latitude: 60,
-          zoom: 3,
+          longitude: 20,
+          latitude: 15,
+          zoom: 1.5,
           pitch: 0,
           bearing: 0,
         }}
@@ -390,7 +403,7 @@ export default function App() {
           interleaved
           onDeviceInitialized={setDevice}
         />
-        {clickInfo && (
+        {clickInfo && clickedClass && (
           <Popup
             longitude={clickInfo.lng}
             latitude={clickInfo.lat}
@@ -400,8 +413,8 @@ export default function App() {
           >
             <div style={{ lineHeight: 1.5 }}>
               <div>
-                <span style={{ opacity: 0.6 }}>Value</span>{" "}
-                <strong>{clickInfo.value}</strong>
+                <span style={{ opacity: 0.6 }}>Class</span>{" "}
+                <strong>{clickedClass.label}</strong>
               </div>
               <div>
                 <span style={{ opacity: 0.6 }}>Lat</span>{" "}
@@ -417,7 +430,7 @@ export default function App() {
       </MaplibreMap>
 
       {/* Loading spinner */}
-      {(tilesLoading || (colormapTexture && !metadataLoaded)) && (
+      {(tilesLoading || (device && !metadataLoaded)) && (
         <div
           style={{
             position: "absolute",
@@ -505,7 +518,7 @@ export default function App() {
           >
             <div>
               <h3 style={{ margin: "0 0 4px 0", fontSize: "16px" }}>
-                Potential Above-Ground Combustion
+                Global Rangelands
               </h3>
               <p
                 style={{
@@ -514,7 +527,7 @@ export default function App() {
                   color: "#666",
                 }}
               >
-                Boreal and Arctic North America — SSP585
+                ~1&nbsp;km resolution · 2024
               </p>
             </div>
             <button
@@ -535,58 +548,42 @@ export default function App() {
             </button>
           </div>
 
-          {/* Min slider */}
-          <div style={{ marginBottom: "8px" }}>
-            <label
-              style={{
-                display: "block",
-                fontSize: "12px",
-                color: "#666",
-                marginBottom: "2px",
-              }}
-            >
-              Min: {rangeMin}
-              <input
-                type="range"
-                min={DATA_MIN}
-                max={DATA_MAX}
-                step={1}
-                value={rangeMin}
-                onChange={(e) =>
-                  setRangeMin(
-                    Math.min(parseFloat(e.target.value), rangeMax - 1),
-                  )
-                }
-                style={{ width: "100%", cursor: "pointer" }}
-              />
-            </label>
-          </div>
-
-          {/* Max slider */}
+          {/* Legend */}
           <div style={{ marginBottom: "12px" }}>
-            <label
+            <div
               style={{
-                display: "block",
                 fontSize: "12px",
                 color: "#666",
-                marginBottom: "2px",
+                marginBottom: "6px",
+                fontWeight: 600,
               }}
             >
-              Max: {rangeMax}
-              <input
-                type="range"
-                min={DATA_MIN}
-                max={DATA_MAX}
-                step={1}
-                value={rangeMax}
-                onChange={(e) =>
-                  setRangeMax(
-                    Math.max(parseFloat(e.target.value), rangeMin + 1),
-                  )
-                }
-                style={{ width: "100%", cursor: "pointer" }}
-              />
-            </label>
+              Legend
+            </div>
+            {CLASSES.map((c) => (
+              <div
+                key={c.value}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "8px",
+                  marginBottom: "4px",
+                  fontSize: "12px",
+                }}
+              >
+                <div
+                  style={{
+                    width: "18px",
+                    height: "14px",
+                    background: c.color,
+                    border: "1px solid #ccc",
+                    borderRadius: "2px",
+                    flexShrink: 0,
+                  }}
+                />
+                <span>{c.label}</span>
+              </div>
+            ))}
           </div>
 
           {/* Basemap toggle */}
@@ -594,7 +591,7 @@ export default function App() {
             <button
               type="button"
               onClick={() =>
-                setBasemap((b) => (b === "dark" ? "satellite" : "dark"))
+                setBasemap((b) => (b === "light" ? "satellite" : "light"))
               }
               style={{
                 width: "100%",
@@ -606,9 +603,9 @@ export default function App() {
                 borderRadius: "4px",
               }}
             >
-              {basemap === "dark"
+              {basemap === "light"
                 ? "Switch to satellite basemap"
-                : "Switch to dark basemap"}
+                : "Switch to light basemap"}
             </button>
           </div>
 
@@ -635,31 +632,10 @@ export default function App() {
             </label>
           </div>
 
-          {/* Colormap gradient preview */}
-          <div
-            style={{
-              height: "12px",
-              borderRadius: "2px",
-              background:
-                "linear-gradient(to right, #440154, #3b528b, #21918c, #5ec962, #b5de2b, #fde725)",
-              marginBottom: "4px",
-            }}
-          />
-          <p
-            style={{
-              margin: "0 0 12px 0",
-              fontSize: "11px",
-              color: "#999",
-              textAlign: "center",
-            }}
-          >
-            g‑C/m<sup>2</sup>
-          </p>
-
           <p style={{ margin: 0, fontSize: "11px", color: "#999" }}>
             Data:{" "}
             <a
-              href="https://source.coop/luddaludwig/potential-agc-combustion-ssp585-v0"
+              href="https://source.coop/woodwell-climate/rangelands-raster-1"
               target="_blank"
               rel="noopener noreferrer"
               style={{ color: "#666" }}
