@@ -92,7 +92,9 @@ type BasemapKey = keyof typeof BASEMAPS;
 // ---- Data source: uint8 global grazing lands COG on Source Cooperative ----
 const COG_URL =
   //"https://data.source.coop/woodwell-climate/rangelands-raster-1/global_grazing_lands_3857.tif?v=1";
-  "https://data.source.coop/woodwell-climate/rangelands-raster-1/global_grazing_lands_4326_84.tif";
+  //"https://data.source.coop/woodwell-climate/rangelands-raster-1/global_grazing_lands_4326_84_v2.tif?v=5";
+  "https://data.source.coop/woodwell-climate/rangelands-raster-1/global_grazing_lands_4326_84_v3.tif";
+//"https://data.source.coop/woodwell-climate/rangelands-raster-1/global_grazing_lands_4326_84.tif";
 
 // Bypass Chrome's single-writer cache lock on range requests to avoid
 // serialized tile fetches (see Chromium disk cache locking behavior).
@@ -105,18 +107,22 @@ const cogPromise = GeoTIFF.fromUrl(COG_URL);
 // ---- Class definitions ----
 // The raster is uint8 with these class values:
 //   0   = not grazing land (discarded as nodata)
-//   1   = livestock-driven grazing (<33% grassland but high livestock)
-//   2   = 33–50% grassland
-//   3   = 50–80% grassland
-//   4   = 80%+ grassland
+//   1   = livestock-driven grazing (<10% grassland but high livestock)
+//   2   = 10–33% grassland
+//   3   = 33–50% grassland
+//   4   = 50–80% grassland
+//   5   = 80%+ grassland
+//   6   = shrub/savanna rangeland (from MODIS)
 //   255 = nodata (discarded)
 type ClassInfo = { value: number; label: string; color: string };
 
 const CLASSES: ClassInfo[] = [
-  { value: 1, label: "Livestock-driven (<33% grass)", color: "#fee0d2" },
-  { value: 2, label: "33–50% grassland", color: "#c2e7bc" },
-  { value: 3, label: "50–80% grassland", color: "#7ccd6f" },
-  { value: 4, label: "80%+ grassland", color: "#5d9a54" },
+  { value: 1, label: "Livestock-driven (<10% grass)", color: "#ff6666" },
+  { value: 2, label: "10–33% grassland", color: "#e8f5e3" },
+  { value: 3, label: "33–50% grassland", color: "#c2e7bc" },
+  { value: 4, label: "50–80% grassland", color: "#7ccd6f" },
+  { value: 5, label: "80%+ grassland", color: "#5d9a54" },
+  { value: 6, label: "Shrub/savanna rangeland", color: "#ffff00" },
 ];
 
 /** Convert "#rrggbb" to normalized [r, g, b] in 0..1 range for GLSL */
@@ -133,12 +139,39 @@ const [C1_R, C1_G, C1_B] = hexToRgbNorm(CLASSES[0].color);
 const [C2_R, C2_G, C2_B] = hexToRgbNorm(CLASSES[1].color);
 const [C3_R, C3_G, C3_B] = hexToRgbNorm(CLASSES[2].color);
 const [C4_R, C4_G, C4_B] = hexToRgbNorm(CLASSES[3].color);
+const [C5_R, C5_G, C5_B] = hexToRgbNorm(CLASSES[4].color);
+const [C6_R, C6_G, C6_B] = hexToRgbNorm(CLASSES[5].color);
 
 // ---- Custom shader: map discrete uint8 class values to colors ----
 // r8unorm maps 0..255 → 0.0..1.0, so rawValue = color.r * 255.0
 // We compare the raw class value and assign the corresponding RGB.
+// Visibility flags (0.0 or 1.0) per class are passed as uniforms so
+// individual classes can be toggled on and off without re-rendering.
+type CategoricalColormapProps = {
+  visible1: number;
+  visible2: number;
+  visible3: number;
+  visible4: number;
+  visible5: number;
+  visible6: number;
+};
+
+const COLORMAP_MODULE_NAME = "categoricalColormap";
+
+const colormapUniformBlock = `\
+uniform ${COLORMAP_MODULE_NAME}Uniforms {
+  float visible1;
+  float visible2;
+  float visible3;
+  float visible4;
+  float visible5;
+  float visible6;
+} ${COLORMAP_MODULE_NAME};
+`;
+
 const CategoricalColormap = {
-  name: "categorical-colormap",
+  name: COLORMAP_MODULE_NAME,
+  fs: colormapUniformBlock,
   inject: {
     "fs:DECKGL_FILTER_COLOR": /* glsl */ `
       float rawValue = color.r * 255.0;
@@ -149,13 +182,23 @@ const CategoricalColormap = {
 
       vec3 rgb;
       if (classValue == 1) {
+        if (${COLORMAP_MODULE_NAME}.visible1 < 0.5) discard;
         rgb = vec3(${C1_R.toFixed(6)}, ${C1_G.toFixed(6)}, ${C1_B.toFixed(6)});
       } else if (classValue == 2) {
+        if (${COLORMAP_MODULE_NAME}.visible2 < 0.5) discard;
         rgb = vec3(${C2_R.toFixed(6)}, ${C2_G.toFixed(6)}, ${C2_B.toFixed(6)});
       } else if (classValue == 3) {
+        if (${COLORMAP_MODULE_NAME}.visible3 < 0.5) discard;
         rgb = vec3(${C3_R.toFixed(6)}, ${C3_G.toFixed(6)}, ${C3_B.toFixed(6)});
       } else if (classValue == 4) {
+        if (${COLORMAP_MODULE_NAME}.visible4 < 0.5) discard;
         rgb = vec3(${C4_R.toFixed(6)}, ${C4_G.toFixed(6)}, ${C4_B.toFixed(6)});
+      } else if (classValue == 5) {
+        if (${COLORMAP_MODULE_NAME}.visible5 < 0.5) discard;
+        rgb = vec3(${C5_R.toFixed(6)}, ${C5_G.toFixed(6)}, ${C5_B.toFixed(6)});
+      } else if (classValue == 6) {
+        if (${COLORMAP_MODULE_NAME}.visible6 < 0.5) discard;
+        rgb = vec3(${C6_R.toFixed(6)}, ${C6_G.toFixed(6)}, ${C6_B.toFixed(6)});
       } else {
         discard;
       }
@@ -163,7 +206,25 @@ const CategoricalColormap = {
       color = vec4(rgb, 1.0);
     `,
   },
-} as const satisfies ShaderModule;
+  uniformTypes: {
+    visible1: "f32",
+    visible2: "f32",
+    visible3: "f32",
+    visible4: "f32",
+    visible5: "f32",
+    visible6: "f32",
+  },
+  getUniforms: (props: Partial<CategoricalColormapProps>) => {
+    return {
+      visible1: props.visible1 ?? 1,
+      visible2: props.visible2 ?? 1,
+      visible3: props.visible3 ?? 1,
+      visible4: props.visible4 ?? 1,
+      visible5: props.visible5 ?? 1,
+      visible6: props.visible6 ?? 1,
+    };
+  },
+} as const satisfies ShaderModule<CategoricalColormapProps>;
 
 // ---- Custom tile data type ----
 type TileData = {
@@ -241,6 +302,15 @@ export default function App() {
     geotiff: GeoTIFF;
     toSourceCRS: (lng: number, lat: number) => [number, number];
   } | null>(null);
+
+  // Per-class visibility (start with all classes visible)
+  const [classVisibility, setClassVisibility] = useState<
+    Record<number, boolean>
+  >(() => Object.fromEntries(CLASSES.map((c) => [c.value, true])));
+
+  const toggleClass = useCallback((value: number) => {
+    setClassVisibility((prev) => ({ ...prev, [value]: !prev[value] }));
+  }, []);
 
   // Wrap getTileData to track in-flight tile requests
   const trackingGetTileData: typeof getTileData = useCallback(
@@ -331,6 +401,14 @@ export default function App() {
         },
         {
           module: CategoricalColormap,
+          props: {
+            visible1: classVisibility[1] ? 1 : 0,
+            visible2: classVisibility[2] ? 1 : 0,
+            visible3: classVisibility[3] ? 1 : 0,
+            visible4: classVisibility[4] ? 1 : 0,
+            visible5: classVisibility[5] ? 1 : 0,
+            visible6: classVisibility[6] ? 1 : 0,
+          },
         },
       ],
       onGeoTIFFLoad: (tiff, options) => {
@@ -373,6 +451,16 @@ export default function App() {
             ];
 
         mapRef.current?.fitBounds(fit, { padding: 40, duration: 1000 });
+      },
+      updateTriggers: {
+        renderTile: [
+          classVisibility[1],
+          classVisibility[2],
+          classVisibility[3],
+          classVisibility[4],
+          classVisibility[5],
+          classVisibility[6],
+        ],
       },
     });
     layers.push(cogLayer);
@@ -548,7 +636,7 @@ export default function App() {
             </button>
           </div>
 
-          {/* Legend */}
+          {/* Legend (click rows to toggle classes) */}
           <div style={{ marginBottom: "12px" }}>
             <div
               style={{
@@ -558,32 +646,62 @@ export default function App() {
                 fontWeight: 600,
               }}
             >
-              Legend
+              Legend &nbsp;
+              <span style={{ fontWeight: 400, fontSize: "10px" }}>
+                (click to toggle)
+              </span>
             </div>
-            {CLASSES.map((c) => (
-              <div
-                key={c.value}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "8px",
-                  marginBottom: "4px",
-                  fontSize: "12px",
-                }}
-              >
-                <div
+            {CLASSES.map((c) => {
+              const isVisible = classVisibility[c.value] ?? true;
+              return (
+                <button
+                  key={c.value}
+                  type="button"
+                  onClick={() => toggleClass(c.value)}
                   style={{
-                    width: "18px",
-                    height: "14px",
-                    background: c.color,
-                    border: "1px solid #ccc",
-                    borderRadius: "2px",
-                    flexShrink: 0,
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "8px",
+                    marginBottom: "4px",
+                    fontSize: "12px",
+                    width: "100%",
+                    padding: "2px 4px",
+                    background: "transparent",
+                    border: "none",
+                    borderRadius: "3px",
+                    cursor: "pointer",
+                    textAlign: "left",
+                    opacity: isVisible ? 1 : 0.4,
+                    color: "inherit",
                   }}
-                />
-                <span>{c.label}</span>
-              </div>
-            ))}
+                  aria-pressed={isVisible}
+                  title={isVisible ? "Click to hide" : "Click to show"}
+                >
+                  <input
+                    type="checkbox"
+                    checked={isVisible}
+                    readOnly
+                    tabIndex={-1}
+                    style={{
+                      margin: 0,
+                      cursor: "pointer",
+                      flexShrink: 0,
+                    }}
+                  />
+                  <div
+                    style={{
+                      width: "18px",
+                      height: "14px",
+                      background: c.color,
+                      border: "1px solid #ccc",
+                      borderRadius: "2px",
+                      flexShrink: 0,
+                    }}
+                  />
+                  <span>{c.label}</span>
+                </button>
+              );
+            })}
           </div>
 
           {/* Basemap toggle */}
