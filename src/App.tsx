@@ -775,6 +775,15 @@ export default function App() {
               deck.gl-raster
             </a>
           </p>
+          <p
+            style={{
+              margin: "4px 0 0 0",
+              fontSize: "11px",
+              color: "#999",
+            }}
+          >
+            Map created by Mika Tosca for Woodwell Climate Research Center
+          </p>
         </div>
       )}
     </div>
