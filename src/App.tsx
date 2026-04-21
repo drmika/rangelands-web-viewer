@@ -93,7 +93,7 @@ type BasemapKey = keyof typeof BASEMAPS;
 const COG_URL =
   //"https://data.source.coop/woodwell-climate/rangelands-raster-1/global_grazing_lands_3857.tif?v=1";
   //"https://data.source.coop/woodwell-climate/rangelands-raster-1/global_grazing_lands_4326_84_v2.tif?v=5";
-  "https://data.source.coop/woodwell-climate/rangelands-raster-1/global_grazing_lands_4326_84_v5.tif";
+  "https://data.source.coop/woodwell-climate/rangelands-raster-1/global_grazing_lands_4326_84_v6.tif";
 //"https://data.source.coop/woodwell-climate/rangelands-raster-1/global_grazing_lands_4326_84.tif";
 
 // Bypass Chrome's single-writer cache lock on range requests to avoid
