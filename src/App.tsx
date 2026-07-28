@@ -106,22 +106,41 @@ const COG_URL = import.meta.env.DEV
   ? `${import.meta.env.BASE_URL}cogs/global_grazing_lands_3857_v6.tif`
   : "https://data.source.coop/woodwell-climate/rangelands-raster-1/global_grazing_lands_3857_v6.tif";
 
-// Bypass Chrome's single-writer cache lock on range requests to avoid
-// serialized tile fetches (see Chromium disk cache locking behavior).
-// Scoped to SourceHttp only — does not affect MapLibre or other fetches.
+// Tile-fetch policy for the COG range requests (SourceHttp only — does not
+// affect MapLibre / basemap). Two concerns:
 //
-// IMPORTANT: only do this on DESKTOP CHROME, where that cache-lock bug exists.
-// `cache: "no-store"` disables all tile caching; on mobile (slower link, fewer
-// connections, no reuse of the COG header/index) that makes tiles trickle in and
-// the loading spinner can hang forever. Mobile browsers cache normally instead.
+//  1) TIMEOUT. Browsers never time out a stalled fetch, so a single hung range
+//     request (a source.coop/CDN hiccup or dropped connection) would leave the
+//     in-flight counter stuck > 0 and the loading spinner spinning forever —
+//     intermittently, since network stalls are random. We abort after
+//     TILE_TIMEOUT_MS so the request rejects, the counter recovers, and the tile
+//     can be re-requested. deck.gl's own per-tile abort (init.signal, used to
+//     cancel out-of-view tiles) is forwarded into our controller so it still works.
+//
+//  2) no-store on DESKTOP CHROME only, to dodge Chromium's disk-cache single-
+//     writer lock that serializes range requests. On mobile no-store hurts (kills
+//     caching over slow links), so those browsers cache normally.
 const _ua = typeof navigator !== "undefined" ? navigator.userAgent : "";
 const _isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(_ua);
 const _isDesktopChrome =
   /Chrome\//.test(_ua) && !/Edg\/|OPR\/|CriOS|FxiOS/.test(_ua) && !_isMobile;
-if (_isDesktopChrome) {
-  SourceHttp.fetch = (input, init) =>
-    fetch(input, { ...init, cache: "no-store" });
-}
+
+const TILE_TIMEOUT_MS = 20000;
+SourceHttp.fetch = (input, init) => {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), TILE_TIMEOUT_MS);
+  // forward deck.gl's abort signal (out-of-view tile cancellation) into ours
+  if (init?.signal) {
+    if (init.signal.aborted) ctrl.abort();
+    else
+      init.signal.addEventListener("abort", () => ctrl.abort(), { once: true });
+  }
+  return fetch(input, {
+    ...init,
+    signal: ctrl.signal,
+    ...(_isDesktopChrome ? { cache: "no-store" } : {}),
+  }).finally(() => clearTimeout(timer));
+};
 
 const cogPromise = GeoTIFF.fromUrl(COG_URL);
 
@@ -345,6 +364,53 @@ function makeFloatTileData(bands: 1 | 2): typeof getTileData {
 const floatTileData1 = makeFloatTileData(1);
 const floatTileData2 = makeFloatTileData(2);
 
+// ---- Click read-out: sample a pixel from any loaded COG at a lng/lat ---------
+const MERC_R = 6378137;
+/** lng/lat (deg) -> the raster's source-CRS coords. Identity for EPSG:4326;
+ *  forward Web-Mercator for EPSG:3857 (the grazing mask). */
+function lngLatToSource(
+  lng: number,
+  lat: number,
+  is3857: boolean,
+): [number, number] {
+  if (!is3857) return [lng, lat];
+  const x = (MERC_R * lng * Math.PI) / 180;
+  const y = MERC_R * Math.log(Math.tan(Math.PI / 4 + (lat * Math.PI) / 360));
+  return [x, y];
+}
+/** Read the band value(s) at a lng/lat from a GeoTIFF; null if out of range. */
+async function readPixelAt(
+  geotiff: GeoTIFF,
+  lng: number,
+  lat: number,
+  is3857: boolean,
+  bands: 1 | 2,
+): Promise<number[] | null> {
+  const [x, y] = lngLatToSource(lng, lat, is3857);
+  const [row, col] = geotiff.index(x, y);
+  if (row < 0 || row >= geotiff.height || col < 0 || col >= geotiff.width)
+    return null;
+  const tile = await geotiff.fetchTile(
+    Math.floor(col / geotiff.tileWidth),
+    Math.floor(row / geotiff.tileHeight),
+  );
+  const arr = tile.array;
+  const idx =
+    (row % geotiff.tileHeight) * arr.width + (col % geotiff.tileWidth);
+  if (bands === 2) {
+    if ("data" in arr) return [arr.data[idx * 2]!, arr.data[idx * 2 + 1]!];
+    return [arr.bands[0]![idx]!, arr.bands[1]![idx]!];
+  }
+  const src = "data" in arr ? arr.data : arr.bands[0]!;
+  return [src[idx]!];
+}
+/** Compact number formatting for the click popup. */
+function fmtVal(v: number): string {
+  if (Math.abs(v) >= 100) return Math.round(v).toLocaleString();
+  if (Math.abs(v) >= 1) return v.toFixed(1);
+  return v.toFixed(2);
+}
+
 export default function App() {
   const mapRef = useRef<MapRef>(null);
   const [device, setDevice] = useState<Device | null>(null);
@@ -359,11 +425,7 @@ export default function App() {
   const [clickInfo, setClickInfo] = useState<{
     lng: number;
     lat: number;
-    value: number;
-  } | null>(null);
-  const geotiffRef = useRef<{
-    geotiff: GeoTIFF;
-    toSourceCRS: (lng: number, lat: number) => [number, number];
+    rows: { label: string; value: string }[];
   } | null>(null);
 
   // Per-class visibility (start with all classes visible)
@@ -462,38 +524,62 @@ export default function App() {
     };
   }, []);
 
-  const handleMapClick = useCallback(async (e: MapLayerMouseEvent) => {
-    const ref = geotiffRef.current;
-    if (!ref) return;
+  // Sample every VISIBLE layer at the clicked point and show them all.
+  const handleMapClick = useCallback(
+    async (e: MapLayerMouseEvent) => {
+      const { lng, lat } = e.lngLat;
+      const rows: { label: string; value: string }[] = [];
 
-    const { geotiff, toSourceCRS } = ref;
-    const [x, y] = toSourceCRS(e.lngLat.lng, e.lngLat.lat);
-    const [row, col] = geotiff.index(x, y);
-
-    if (row < 0 || row >= geotiff.height || col < 0 || col >= geotiff.width) {
-      setClickInfo(null);
-      return;
-    }
-
-    const tileX = Math.floor(col / geotiff.tileWidth);
-    const tileY = Math.floor(row / geotiff.tileHeight);
-
-    try {
-      const tile = await geotiff.fetchTile(tileX, tileY);
-      const px = col % geotiff.tileWidth;
-      const py = row % geotiff.tileHeight;
-      const arr = "data" in tile.array ? tile.array.data : tile.array.bands[0]!;
-      const value = arr[py * tile.array.width + px]!;
-      // Only show popup for real grazing-land classes (1–4)
-      if (value === 0 || value === 255) {
-        setClickInfo(null);
-      } else {
-        setClickInfo({ lng: e.lngLat.lng, lat: e.lngLat.lat, value });
+      // grazing mask — EPSG:3857 uint8 class codes
+      if (grazingVisible && cog) {
+        try {
+          const v = await readPixelAt(cog, lng, lat, true, 1);
+          const cls = v?.[0];
+          if (cls != null && cls !== 0 && cls !== 255 && Number.isFinite(cls)) {
+            const info = CLASSES.find((c) => c.value === cls);
+            rows.push({
+              label: "Grazing class",
+              value: info ? info.label : `${cls}`,
+            });
+          }
+        } catch {
+          /* out of range or fetch error — skip this layer */
+        }
       }
-    } catch {
-      setClickInfo(null);
-    }
-  }, []);
+
+      // continuous data layers — EPSG:4326 (trend = slope + p-value, mean = value)
+      for (const def of DATA_LAYERS) {
+        if (!dataVisible[def.id]) continue;
+        const gt = dataGeotiffs[def.id];
+        if (!gt) continue;
+        try {
+          // data layers are now native EPSG:3857 (like the grazing mask)
+          const v = await readPixelAt(gt, lng, lat, true, def.bands);
+          const val = v?.[0];
+          if (val == null || !Number.isFinite(val) || val === def.nodata)
+            continue;
+          if (def.bands === 2) {
+            const p = v[1]!;
+            const sig = Number.isFinite(p) && p < MK_ALPHA;
+            rows.push({
+              label: `${def.label} (${def.sublabel})`,
+              value: `${fmtVal(val)} ${def.units} · p=${p.toFixed(3)} ${sig ? "✓ significant" : "n.s."}`,
+            });
+          } else {
+            rows.push({
+              label: `${def.label} (${def.sublabel})`,
+              value: `${fmtVal(val)} ${def.units}`,
+            });
+          }
+        } catch {
+          /* skip this layer */
+        }
+      }
+
+      setClickInfo(rows.length ? { lng, lat, rows } : null);
+    },
+    [cog, grazingVisible, dataVisible, dataGeotiffs],
+  );
 
   const layers = [];
 
@@ -531,14 +617,6 @@ export default function App() {
           tileHeight: tiff.tileHeight,
         });
         setMetadataLoaded(true);
-
-        // For EPSG:4326 rasters, source CRS IS lat/lon, so the converter is
-        // an identity function. This avoids trying to build a (broken) proj4
-        // transformer from our stub projection object.
-        geotiffRef.current = {
-          geotiff: tiff,
-          toSourceCRS: (lng, lat) => [lng, lat],
-        };
 
         // Use bounds from options if valid, otherwise fall back to global
         // extent. We know from gdalinfo this raster is -180,-90,180,90.
@@ -596,11 +674,6 @@ export default function App() {
     );
   }
 
-  // Look up the label for the currently clicked class
-  const clickedClass = clickInfo
-    ? CLASSES.find((c) => c.value === clickInfo.value)
-    : null;
-
   return (
     <div style={{ position: "relative", width: "100%", height: "100%" }}>
       <MaplibreMap
@@ -621,26 +694,26 @@ export default function App() {
           interleaved
           onDeviceInitialized={setDevice}
         />
-        {clickInfo && clickedClass && (
+        {clickInfo && (
           <Popup
             longitude={clickInfo.lng}
             latitude={clickInfo.lat}
             closeOnClick={false}
             onClose={() => setClickInfo(null)}
             anchor="bottom"
+            maxWidth="300px"
           >
-            <div style={{ lineHeight: 1.5 }}>
-              <div>
-                <span style={{ opacity: 0.6 }}>Class</span>{" "}
-                <strong>{clickedClass.label}</strong>
-              </div>
-              <div>
-                <span style={{ opacity: 0.6 }}>Lat</span>{" "}
-                {clickInfo.lat.toFixed(5)}
-              </div>
-              <div>
-                <span style={{ opacity: 0.6 }}>Lon</span>{" "}
-                {clickInfo.lng.toFixed(5)}
+            <div style={{ lineHeight: 1.45, fontSize: "12px" }}>
+              {clickInfo.rows.map((r) => (
+                <div key={r.label} style={{ marginBottom: "3px" }}>
+                  <div style={{ opacity: 0.6, fontSize: "11px" }}>
+                    {r.label}
+                  </div>
+                  <strong>{r.value}</strong>
+                </div>
+              ))}
+              <div style={{ opacity: 0.5, fontSize: "10px", marginTop: "4px" }}>
+                {clickInfo.lat.toFixed(4)}°, {clickInfo.lng.toFixed(4)}°
               </div>
             </div>
           </Popup>
