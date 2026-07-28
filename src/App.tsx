@@ -9,9 +9,17 @@ import { GeoTIFF } from "@developmentseed/geotiff";
 import type { Device, Texture } from "@luma.gl/core";
 import type { ShaderModule } from "@luma.gl/shadertools";
 import "maplibre-gl/dist/maplibre-gl.css";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MapLayerMouseEvent, MapRef } from "react-map-gl/maplibre";
 import { Map as MaplibreMap, Popup, useControl } from "react-map-gl/maplibre";
+import type { LayerDef } from "./dataLayers";
+import {
+  COG_BASE,
+  DATA_LAYERS,
+  ALPHA as MK_ALPHA,
+  MODULES,
+  rampCss,
+} from "./dataLayers";
 
 // ---- Custom EPSG resolver ----
 // ---- Custom EPSG resolver ----
@@ -90,17 +98,30 @@ const BASEMAPS = {
 type BasemapKey = keyof typeof BASEMAPS;
 
 // ---- Data source: uint8 global grazing lands COG on Source Cooperative ----
-const COG_URL =
-  //"https://data.source.coop/woodwell-climate/rangelands-raster-1/global_grazing_lands_3857.tif?v=1";
-  //"https://data.source.coop/woodwell-climate/rangelands-raster-1/global_grazing_lands_4326_84_v2.tif?v=5";
-  "https://data.source.coop/woodwell-climate/rangelands-raster-1/global_grazing_lands_4326_84_v6.tif";
-//"https://data.source.coop/woodwell-climate/rangelands-raster-1/global_grazing_lands_4326_84.tif";
+// NATIVE web-mercator (EPSG:3857) COG regridded from the current v6 data, so
+// deck.gl never reprojects tiles from 4326 -> 3857 on the main thread (that
+// on-the-fly reprojection was locking up the page). Dev serves the local copy;
+// prod streams it from source.coop (upload global_grazing_lands_3857_v6.tif).
+const COG_URL = import.meta.env.DEV
+  ? `${import.meta.env.BASE_URL}cogs/global_grazing_lands_3857_v6.tif`
+  : "https://data.source.coop/woodwell-climate/rangelands-raster-1/global_grazing_lands_3857_v6.tif";
 
 // Bypass Chrome's single-writer cache lock on range requests to avoid
 // serialized tile fetches (see Chromium disk cache locking behavior).
 // Scoped to SourceHttp only — does not affect MapLibre or other fetches.
-SourceHttp.fetch = (input, init) =>
-  fetch(input, { ...init, cache: "no-store" });
+//
+// IMPORTANT: only do this on DESKTOP CHROME, where that cache-lock bug exists.
+// `cache: "no-store"` disables all tile caching; on mobile (slower link, fewer
+// connections, no reuse of the COG header/index) that makes tiles trickle in and
+// the loading spinner can hang forever. Mobile browsers cache normally instead.
+const _ua = typeof navigator !== "undefined" ? navigator.userAgent : "";
+const _isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(_ua);
+const _isDesktopChrome =
+  /Chrome\//.test(_ua) && !/Edg\/|OPR\/|CriOS|FxiOS/.test(_ua) && !_isMobile;
+if (_isDesktopChrome) {
+  SourceHttp.fetch = (input, init) =>
+    fetch(input, { ...init, cache: "no-store" });
+}
 
 const cogPromise = GeoTIFF.fromUrl(COG_URL);
 
@@ -282,6 +303,48 @@ async function getTileData(
   return { texture, height, width };
 }
 
+/** Tile loader for continuous float32 COGs. 1-band -> r32float (value in .r);
+ *  2-band -> rg32float (slope in .r, p-value in .g). Handles both decoded
+ *  layouts: pixel-interleaved (`.data`, which is already [b0,b1,b0,b1,...]) and
+ *  band-separate (`.bands[]`, interleaved manually). Sampled with nearest. */
+function makeFloatTileData(bands: 1 | 2): typeof getTileData {
+  return async (image, options) => {
+    const { device, x, y, signal } = options;
+    const tile = await image.fetchTile(x, y, { signal, boundless: false });
+    const arr = tile.array;
+    const { width, height } = arr;
+
+    let data: Float32Array;
+    if ("data" in arr) {
+      // pixel-interleaved: already [b0,b1,...] (2-band) or [b0,...] (1-band)
+      data =
+        arr.data instanceof Float32Array
+          ? arr.data
+          : new Float32Array(arr.data as ArrayLike<number>);
+    } else {
+      // band-separate: interleave the bands
+      const n = width * height;
+      data = new Float32Array(n * bands);
+      for (let i = 0; i < n; i++) {
+        for (let k = 0; k < bands; k++) data[i * bands + k] = arr.bands[k]![i];
+      }
+    }
+
+    const texture = device.createTexture({
+      data,
+      format: bands === 2 ? "rg32float" : "r32float",
+      width,
+      height,
+      sampler: { minFilter: "nearest", magFilter: "nearest" },
+    });
+    return { texture, width, height };
+  };
+}
+
+// Stable loader identities (avoid re-creating per render)
+const floatTileData1 = makeFloatTileData(1);
+const floatTileData2 = makeFloatTileData(2);
+
 export default function App() {
   const mapRef = useRef<MapRef>(null);
   const [device, setDevice] = useState<Device | null>(null);
@@ -312,25 +375,72 @@ export default function App() {
     setClassVisibility((prev) => ({ ...prev, [value]: !prev[value] }));
   }, []);
 
-  // Wrap getTileData to track in-flight tile requests
-  const trackingGetTileData: typeof getTileData = useCallback(
-    async (image, options) => {
-      loadingCountRef.current++;
-      if (loadingCountRef.current === 1) {
-        clearTimeout(hideTimerRef.current);
-        setTilesLoading(true);
+  // ---- Layer visibility -----------------------------------------------------
+  // On first load: grazing mask ON, all continuous data layers OFF.
+  const [grazingVisible, setGrazingVisible] = useState(true);
+  const [dataVisible, setDataVisible] = useState<Record<string, boolean>>(() =>
+    Object.fromEntries(DATA_LAYERS.map((d) => [d.id, false])),
+  );
+  const toggleData = useCallback((id: string) => {
+    setDataVisible((prev) => ({ ...prev, [id]: !prev[id] }));
+  }, []);
+
+  // Lazily fetch each continuous COG the first time its layer is switched on.
+  const [dataGeotiffs, setDataGeotiffs] = useState<Record<string, GeoTIFF>>({});
+  const loadingIdsRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    for (const def of DATA_LAYERS) {
+      if (
+        dataVisible[def.id] &&
+        !dataGeotiffs[def.id] &&
+        !loadingIdsRef.current.has(def.id)
+      ) {
+        loadingIdsRef.current.add(def.id);
+        GeoTIFF.fromUrl(COG_BASE + def.file)
+          .then((t) => setDataGeotiffs((prev) => ({ ...prev, [def.id]: t })))
+          .catch((e) => {
+            console.error(`Failed to load ${def.file}:`, e);
+            loadingIdsRef.current.delete(def.id);
+          });
       }
-      try {
-        return await getTileData(image, options);
-      } finally {
-        loadingCountRef.current--;
-        if (loadingCountRef.current === 0) {
+    }
+  }, [dataVisible, dataGeotiffs]);
+
+  // Wrap any tile loader to track in-flight requests (drives the spinner)
+  const withTracking = useCallback(
+    (loader: typeof getTileData): typeof getTileData =>
+      async (image, options) => {
+        loadingCountRef.current++;
+        if (loadingCountRef.current === 1) {
           clearTimeout(hideTimerRef.current);
-          hideTimerRef.current = setTimeout(() => setTilesLoading(false), 150);
+          setTilesLoading(true);
         }
-      }
-    },
+        try {
+          return await loader(image, options);
+        } finally {
+          loadingCountRef.current--;
+          if (loadingCountRef.current === 0) {
+            clearTimeout(hideTimerRef.current);
+            hideTimerRef.current = setTimeout(
+              () => setTilesLoading(false),
+              150,
+            );
+          }
+        }
+      },
     [],
+  );
+  const trackingGetTileData = useMemo(
+    () => withTracking(getTileData),
+    [withTracking],
+  );
+  const trackedFloat1 = useMemo(
+    () => withTracking(floatTileData1),
+    [withTracking],
+  );
+  const trackedFloat2 = useMemo(
+    () => withTracking(floatTileData2),
+    [withTracking],
   );
 
   // Clean up debounce timer on unmount
@@ -387,7 +497,7 @@ export default function App() {
 
   const layers = [];
 
-  if (cog) {
+  if (cog && grazingVisible) {
     const cogLayer = new COGLayer<TileData>({
       id: "grazing-lands-layer",
       opacity: dataOpacity,
@@ -466,6 +576,26 @@ export default function App() {
     layers.push(cogLayer);
   }
 
+  // Continuous data layers (trend slopes + means), rendered above the mask.
+  for (const def of DATA_LAYERS) {
+    if (!dataVisible[def.id]) continue;
+    const tiff = dataGeotiffs[def.id];
+    if (!tiff) continue; // still fetching header
+    layers.push(
+      new COGLayer<TileData>({
+        id: def.id,
+        opacity: dataOpacity,
+        geotiff: tiff,
+        epsgResolver: customEpsgResolver,
+        getTileData: def.bands === 2 ? trackedFloat2 : trackedFloat1,
+        renderTile: (tileData: TileData): RasterModule[] => [
+          { module: CreateTexture, props: { textureName: tileData.texture } },
+          { module: MODULES[def.id] as unknown as ShaderModule, props: {} },
+        ],
+      }),
+    );
+  }
+
   // Look up the label for the currently clicked class
   const clickedClass = clickInfo
     ? CLASSES.find((c) => c.value === clickInfo.value)
@@ -516,6 +646,75 @@ export default function App() {
           </Popup>
         )}
       </MaplibreMap>
+
+      {/* Per-layer legends (one card per active data layer, top-center) */}
+      <div
+        style={{
+          position: "absolute",
+          top: "12px",
+          left: "50%",
+          transform: "translateX(-50%)",
+          zIndex: 900,
+          display: "flex",
+          flexDirection: "column",
+          gap: "6px",
+          alignItems: "center",
+          pointerEvents: "none",
+        }}
+      >
+        {DATA_LAYERS.filter((d) => dataVisible[d.id]).map((def) => {
+          const [lo, hi] = def.domain;
+          const diverging = lo < 0 && hi > 0;
+          const fmt = (v: number) =>
+            Math.abs(v) >= 100 ? Math.round(v).toLocaleString() : v.toFixed(1);
+          return (
+            <div
+              key={def.id}
+              style={{
+                background: "white",
+                padding: "6px 12px",
+                borderRadius: "6px",
+                boxShadow: "0 2px 8px rgba(0,0,0,0.15)",
+                fontSize: "11px",
+                minWidth: "210px",
+              }}
+            >
+              <div style={{ fontWeight: 600, marginBottom: "3px" }}>
+                {def.label}{" "}
+                <span style={{ fontWeight: 400, color: "#999" }}>
+                  {def.sublabel}
+                </span>
+              </div>
+              <div
+                style={{
+                  height: "10px",
+                  borderRadius: "2px",
+                  background: rampCss(def),
+                  border: "1px solid #ccc",
+                }}
+              />
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  marginTop: "2px",
+                  color: "#555",
+                }}
+              >
+                <span>{fmt(lo)}</span>
+                {diverging && <span>0</span>}
+                <span>{fmt(hi)}</span>
+              </div>
+              <div
+                style={{ color: "#888", fontSize: "10px", marginTop: "1px" }}
+              >
+                {def.units}
+                {def.hatch ? " · hatched = not significant (p ≥ 0.05)" : ""}
+              </div>
+            </div>
+          );
+        })}
+      </div>
 
       {/* Loading spinner */}
       {(tilesLoading || (device && !metadataLoaded)) && (
@@ -634,6 +833,122 @@ export default function App() {
             >
               &#10005;
             </button>
+          </div>
+
+          {/* Map layers (toggle whole layers on/off) */}
+          <div style={{ marginBottom: "14px" }}>
+            <div
+              style={{
+                fontSize: "12px",
+                color: "#666",
+                marginBottom: "6px",
+                fontWeight: 600,
+              }}
+            >
+              Map layers
+            </div>
+
+            {/* grazing mask master toggle */}
+            <button
+              type="button"
+              onClick={() => setGrazingVisible((v) => !v)}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "8px",
+                marginBottom: "4px",
+                fontSize: "12px",
+                width: "100%",
+                padding: "2px 4px",
+                background: "transparent",
+                border: "none",
+                borderRadius: "3px",
+                cursor: "pointer",
+                textAlign: "left",
+                opacity: grazingVisible ? 1 : 0.4,
+                color: "inherit",
+              }}
+              aria-pressed={grazingVisible}
+            >
+              <input
+                type="checkbox"
+                checked={grazingVisible}
+                readOnly
+                tabIndex={-1}
+                style={{ margin: 0, flexShrink: 0 }}
+              />
+              <div
+                style={{
+                  width: "18px",
+                  height: "14px",
+                  background: "#5d9a54",
+                  border: "1px solid #ccc",
+                  borderRadius: "2px",
+                  flexShrink: 0,
+                }}
+              />
+              <span style={{ fontWeight: 600 }}>Grazing lands mask</span>
+            </button>
+
+            {/* continuous data layers */}
+            {DATA_LAYERS.map((def: LayerDef) => {
+              const on = dataVisible[def.id] ?? false;
+              const loading = on && !dataGeotiffs[def.id];
+              return (
+                <button
+                  key={def.id}
+                  type="button"
+                  onClick={() => toggleData(def.id)}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "8px",
+                    marginBottom: "4px",
+                    fontSize: "12px",
+                    width: "100%",
+                    padding: "2px 4px",
+                    background: "transparent",
+                    border: "none",
+                    borderRadius: "3px",
+                    cursor: "pointer",
+                    textAlign: "left",
+                    opacity: on ? 1 : 0.45,
+                    color: "inherit",
+                  }}
+                  aria-pressed={on}
+                >
+                  <input
+                    type="checkbox"
+                    checked={on}
+                    readOnly
+                    tabIndex={-1}
+                    style={{ margin: 0, flexShrink: 0 }}
+                  />
+                  <div
+                    style={{
+                      width: "18px",
+                      height: "14px",
+                      background: rampCss(def),
+                      border: "1px solid #ccc",
+                      borderRadius: "2px",
+                      flexShrink: 0,
+                    }}
+                  />
+                  <span style={{ flex: 1 }}>
+                    {def.label}{" "}
+                    <span style={{ color: "#999", fontSize: "10px" }}>
+                      {def.sublabel}
+                    </span>
+                  </span>
+                  {loading && (
+                    <span style={{ fontSize: "10px", color: "#999" }}>…</span>
+                  )}
+                </button>
+              );
+            })}
+            <div style={{ fontSize: "10px", color: "#999", marginTop: "2px" }}>
+              Trends: hatched = not significant (MK p ≥ {MK_ALPHA})
+            </div>
           </div>
 
           {/* Legend (click rows to toggle classes) */}
