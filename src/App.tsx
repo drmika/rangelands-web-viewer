@@ -16,6 +16,7 @@ import type { LayerDef } from "./dataLayers";
 import {
   COG_BASE,
   DATA_LAYERS,
+  fmtTick,
   ALPHA as MK_ALPHA,
   MODULES,
   rampCss,
@@ -404,11 +405,14 @@ async function readPixelAt(
   const src = "data" in arr ? arr.data : arr.bands[0]!;
   return [src[idx]!];
 }
-/** Compact number formatting for the click popup. */
+/** Compact number formatting for the click popup. The climate trends are small
+ *  (tas is ~0.03 K yr⁻¹), so keep enough decimals for them to differ. */
 function fmtVal(v: number): string {
-  if (Math.abs(v) >= 100) return Math.round(v).toLocaleString();
-  if (Math.abs(v) >= 1) return v.toFixed(1);
-  return v.toFixed(2);
+  const a = Math.abs(v);
+  if (a >= 100) return Math.round(v).toLocaleString();
+  if (a >= 1) return v.toFixed(1);
+  if (a >= 0.1) return v.toFixed(2);
+  return v.toFixed(4);
 }
 
 export default function App() {
@@ -738,8 +742,11 @@ export default function App() {
         {DATA_LAYERS.filter((d) => dataVisible[d.id]).map((def) => {
           const [lo, hi] = def.domain;
           const diverging = lo < 0 && hi > 0;
-          const fmt = (v: number) =>
-            Math.abs(v) >= 100 ? Math.round(v).toLocaleString() : v.toFixed(1);
+          // Where zero actually falls along the bar. Symmetric domains put it at
+          // 50%, but the recentred ramps (e.g. tas, -0.05..+0.10) do not, and a
+          // "0" label pinned to the centre would sit over a warm colour.
+          const zeroPct = ((0 - lo) / (hi - lo)) * 100;
+          const fmt = (v: number) => fmtTick(v, hi - lo);
           return (
             <div
               key={def.id}
@@ -768,6 +775,7 @@ export default function App() {
               />
               <div
                 style={{
+                  position: "relative",
                   display: "flex",
                   justifyContent: "space-between",
                   marginTop: "2px",
@@ -775,7 +783,17 @@ export default function App() {
                 }}
               >
                 <span>{fmt(lo)}</span>
-                {diverging && <span>0</span>}
+                {diverging && (
+                  <span
+                    style={{
+                      position: "absolute",
+                      left: `${zeroPct}%`,
+                      transform: "translateX(-50%)",
+                    }}
+                  >
+                    0
+                  </span>
+                )}
                 <span>{fmt(hi)}</span>
               </div>
               <div
